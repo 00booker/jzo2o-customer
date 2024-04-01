@@ -5,6 +5,8 @@ import com.jzo2o.api.customer.dto.request.InstitutionStaffPageQueryReqDTO;
 import com.jzo2o.api.customer.dto.response.InstitutionStaffResDTO;
 import com.jzo2o.common.model.PageResult;
 import com.jzo2o.customer.model.domain.InstitutionStaff;
+import com.jzo2o.customer.model.dto.request.InstitutionRegisterReqDTO;
+import com.jzo2o.customer.model.dto.request.InstitutionResetPasswordReqDTO;
 import com.jzo2o.customer.model.dto.request.InstitutionStaffUpsertReqDTO;
 import com.jzo2o.customer.model.dto.response.InstitutionStaffSimpleResDTO;
 import com.baomidou.mybatisplus.extension.service.IService;
@@ -79,4 +81,8 @@ public interface IInstitutionStaffService extends IService<InstitutionStaff> {
      * @return 机构下服务人员列表
      */
     List<InstitutionStaffResDTO> findByInstitutionId(Long institutionId);
+
+    void institutionRegister(InstitutionRegisterReqDTO institutionRegisterReqDTO);
+
+    void institutionResetPassword(InstitutionResetPasswordReqDTO institutionRegisterReqDTO);
 }

@@ -1,27 +1,33 @@
 package com.jzo2o.customer.service.impl;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.util.ObjectUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.jzo2o.api.customer.dto.response.AddressBookResDTO;
-import com.jzo2o.common.expcetions.ForbiddenOperationException;
-import com.jzo2o.common.model.CurrentUserInfo;
+import com.jzo2o.api.publics.MapApi;
+import com.jzo2o.api.publics.dto.response.LocationResDTO;
 import com.jzo2o.common.model.PageResult;
-import com.jzo2o.common.model.dto.PageQueryDTO;
 import com.jzo2o.common.utils.BeanUtils;
 import com.jzo2o.common.utils.CollUtils;
+import com.jzo2o.common.utils.NumberUtils;
+import com.jzo2o.common.utils.StringUtils;
 import com.jzo2o.customer.mapper.AddressBookMapper;
 import com.jzo2o.customer.model.domain.AddressBook;
+import com.jzo2o.customer.model.dto.request.AddressBookPageQueryReqDTO;
 import com.jzo2o.customer.model.dto.request.AddressBookUpsertReqDTO;
 import com.jzo2o.customer.service.IAddressBookService;
 import com.jzo2o.mvc.utils.UserContext;
 import com.jzo2o.mysql.utils.PageUtils;
 import org.springframework.stereotype.Service;
-import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.transaction.annotation.Transactional;
 
+import javax.annotation.Resource;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * <p>
@@ -33,6 +39,146 @@ import java.util.Optional;
  */
 @Service
 public class AddressBookServiceImpl extends ServiceImpl<AddressBookMapper, AddressBook> implements IAddressBookService {
+    @Resource
+    private AddressBookMapper addressBookMapper;
+    @Resource
+    private MapApi mapApi;
+
+    /**
+     * 地址薄新增
+     *
+     * @param addressBookUpsertReqDTO 插入更新地址薄
+     */
+    @Override
+    public void add(AddressBookUpsertReqDTO addressBookUpsertReqDTO) {
+        //当前用户id
+        Long userId = UserContext.currentUserId();
+        //如果新增地址设为默认，取消其他默认地址
+        if (1 == addressBookUpsertReqDTO.getIsDefault()) {
+            cancelDefault(userId);
+        }
+
+        AddressBook addressBook = BeanUtil.toBean(addressBookUpsertReqDTO, AddressBook.class);
+        addressBook.setUserId(userId);
+
+        //组装详细地址
+        String completeAddress = addressBookUpsertReqDTO.getProvince() +
+                addressBookUpsertReqDTO.getCity() +
+                addressBookUpsertReqDTO.getCounty() +
+                addressBookUpsertReqDTO.getAddress();
+
+        //如果请求体中没有经纬度，需要调用第三方api根据详细地址获取经纬度
+        if(ObjectUtil.isEmpty(addressBookUpsertReqDTO.getLocation())){
+            //远程请求高德获取经纬度
+            LocationResDTO locationDto = mapApi.getLocationByAddress(completeAddress);
+            //经纬度(字符串格式：经度,纬度),经度在前，纬度在后
+            String location = locationDto.getLocation();
+            addressBookUpsertReqDTO.setLocation(location);
+        }
+
+        if(StringUtils.isNotEmpty(addressBookUpsertReqDTO.getLocation())) {
+            // 经度
+            addressBook.setLon(NumberUtils.parseDouble(addressBookUpsertReqDTO.getLocation().split(",")[0]));
+            // 纬度
+            addressBook.setLat(NumberUtils.parseDouble(addressBookUpsertReqDTO.getLocation().split(",")[1]));
+        }
+        addressBookMapper.insert(addressBook);
+    }
+
+    /**
+     * 地址薄修改
+     *
+     * @param id                      地址薄id
+     * @param addressBookUpsertReqDTO 插入更新地址薄
+     */
+    @Override
+    @Transactional
+    public void update(Long id, AddressBookUpsertReqDTO addressBookUpsertReqDTO) {
+        if (1 == addressBookUpsertReqDTO.getIsDefault()) {
+            cancelDefault(UserContext.currentUserId());
+        }
+
+        AddressBook addressBook = BeanUtil.toBean(addressBookUpsertReqDTO, AddressBook.class);
+        addressBook.setId(id);
+
+        //调用第三方，根据地址获取经纬度坐标
+        String completeAddress = addressBookUpsertReqDTO.getProvince() +
+                addressBookUpsertReqDTO.getCity() +
+                addressBookUpsertReqDTO.getCounty() +
+                addressBookUpsertReqDTO.getAddress();
+        //远程请求高德获取经纬度
+        LocationResDTO locationDto = mapApi.getLocationByAddress(completeAddress);
+        //经纬度(字符串格式：经度,纬度),经度在前，纬度在后
+        String location = locationDto.getLocation();
+        if(StringUtils.isNotEmpty(location)) {
+            // 经度
+            addressBook.setLon(NumberUtils.parseDouble(locationDto.getLocation().split(",")[0]));
+            // 纬度
+            addressBook.setLat(NumberUtils.parseDouble(locationDto.getLocation().split(",")[1]));
+        }
+        addressBookMapper.updateById(addressBook);
+    }
+
+    /**
+     * 取消默认
+     *
+     * @param userId 用户id
+     */
+    private void cancelDefault(Long userId) {
+        LambdaUpdateWrapper<AddressBook> updateWrapper = Wrappers.<AddressBook>lambdaUpdate()
+                .eq(AddressBook::getUserId, userId)
+                .set(AddressBook::getIsDefault, 0);
+        super.update(updateWrapper);
+    }
+
+    /**
+     * 地址薄设为默认/取消默认
+     *
+     * @param userId 用户id
+     * @param id   地址薄id
+     * @param flag 是否为默认地址，0：否，1：是
+     */
+    @Override
+    public void updateDefaultStatus(Long userId,Long id, Integer flag) {
+        if (1 == flag) {
+            //如果设默认地址，先把其他地址取消默认
+            cancelDefault(userId);
+        }
+
+        AddressBook addressBook = new AddressBook();
+        addressBook.setId(id);
+        addressBook.setIsDefault(flag);
+        addressBookMapper.updateById(addressBook);
+    }
+
+    /**
+     * 分页查询
+     *
+     * @param addressBookPageQueryReqDTO 查询条件
+     * @return 分页结果
+     */
+    @Override
+    public PageResult<AddressBookResDTO> page(AddressBookPageQueryReqDTO addressBookPageQueryReqDTO) {
+        Page<AddressBook> page = PageUtils.parsePageQuery(addressBookPageQueryReqDTO, AddressBook.class);
+
+        LambdaQueryWrapper<AddressBook> queryWrapper = Wrappers.<AddressBook>lambdaQuery().eq(AddressBook::getUserId, UserContext.currentUserId());
+        Page<AddressBook> serveTypePage = addressBookMapper.selectPage(page, queryWrapper);
+        return PageUtils.toPage(serveTypePage, AddressBookResDTO.class);
+    }
+
+    /**
+     * 获取默认地址
+     *
+     * @return 默认地址
+     */
+    @Override
+    public AddressBookResDTO defaultAddress() {
+        LambdaQueryWrapper<AddressBook> queryWrapper = Wrappers.<AddressBook>lambdaQuery()
+                .eq(AddressBook::getUserId, UserContext.currentUserId())
+                .eq(AddressBook::getIsDefault, 1);
+        AddressBook addressBook = addressBookMapper.selectOne(queryWrapper);
+        return BeanUtil.toBean(addressBook, AddressBookResDTO.class);
+    }
 
     @Override
     public List<AddressBookResDTO> getByUserIdAndCity(Long userId, String city) {
@@ -45,141 +191,5 @@ public class AddressBookServiceImpl extends ServiceImpl<AddressBookMapper, Addre
             return new ArrayList<>();
         }
         return BeanUtils.copyToList(addressBooks, AddressBookResDTO.class);
-    }
-
-    @Override
-    public void addAddressBook(AddressBookUpsertReqDTO addressBookUpsertReqDTO) {
-        String[] s = new String[2];
-        CurrentUserInfo currentUserInfo = UserContext.currentUser();
-        AddressBook addressBook = new AddressBook().setUserId(currentUserInfo.getId());
-        if (addressBookUpsertReqDTO.getName() == null) {
-            throw new ForbiddenOperationException("名称不能为空");
-        }
-        addressBook.setName(addressBookUpsertReqDTO.getName());
-        if (addressBookUpsertReqDTO.getAddress() == null) {
-            throw new ForbiddenOperationException("详细不能为空");
-        }
-        addressBook.setAddress(addressBookUpsertReqDTO.getAddress());
-        if (addressBookUpsertReqDTO.getPhone() == null) {
-            throw new ForbiddenOperationException("电话不能为空");
-        }
-        addressBook.setPhone(addressBookUpsertReqDTO.getPhone());
-        if (addressBookUpsertReqDTO.getProvince() == null) {
-            throw new ForbiddenOperationException("省份不能为空");
-        }
-        addressBook.setProvince(addressBookUpsertReqDTO.getProvince());
-        if (addressBookUpsertReqDTO.getCity() == null) {
-            throw new ForbiddenOperationException("城市不能为空");
-        }
-        addressBook.setCity(addressBookUpsertReqDTO.getCity());
-        if (addressBookUpsertReqDTO.getCounty() == null) {
-            throw new ForbiddenOperationException("地区不能为空");
-        }
-        addressBook.setCounty(addressBookUpsertReqDTO.getCounty());
-         String local = addressBookUpsertReqDTO.getLocation();
-        if (local != null) {
-            String[] adressSegments = local.split(",");
-            addressBook.setLon(Double.valueOf(adressSegments[0]));
-            addressBook.setLat(Double.valueOf(adressSegments[1]));
-        }
-        addressBook.setIsDefault(addressBookUpsertReqDTO.getIsDefault());
-
-        super.save(addressBook);
-    }
-
-    @Override
-    public PageResult<AddressBookResDTO> pageQueryAddressBook(PageQueryDTO pageQueryDTO) {
-        CurrentUserInfo currentUserInfo = UserContext.currentUser();
-        Long currentUserId = UserContext.currentUserId();
-        Page<AddressBook> addressBookPage = PageUtils.parsePageQuery(pageQueryDTO, AddressBook.class);
-        // 创建QueryWrapper并添加用户ID匹配条件
-        QueryWrapper<AddressBook> queryWrapper = new QueryWrapper<>();
-        queryWrapper.eq("user_id", currentUserInfo.getId());
-        // Page<AddressBook> addressBookPage1 = baseMapper.selectPage(addressBookPage, new QueryWrapper<>().eq("user_id", currentUserId));
-        Page<AddressBook> addressBookPage1 = baseMapper.selectPage(addressBookPage, queryWrapper);
-        return PageUtils.toPage(addressBookPage1, AddressBookResDTO.class);
-    }
-
-    @Override
-    public AddressBookResDTO getAddressBookById(Long id) {
-        if (id == null) {
-            throw new ForbiddenOperationException("id不能为空");
-        }
-        // 简化后的代码
-        AddressBook byId = Optional.ofNullable(super.getById(id))
-                .orElseThrow(() -> new ForbiddenOperationException("Address book not found for ID: " + id));
-        AddressBookResDTO addressBookResDTO = BeanUtils.copyProperties(byId, AddressBookResDTO.class);
-        return addressBookResDTO;
-    }
-
-    @Override
-    public void updateById(Long id, @RequestBody AddressBookUpsertReqDTO addressBookUpsertReqDTO){
-        if (id == null) {
-            throw new ForbiddenOperationException("id不能为空");
-        }
-        // 简化后的代码
-        AddressBook byId = Optional.ofNullable(super.getById(id))
-                .orElseThrow(() -> new ForbiddenOperationException("Address book not found for ID: " + id));
-
-        AddressBook addressBook = BeanUtils.copyProperties(addressBookUpsertReqDTO, AddressBook.class);
-        String local = addressBookUpsertReqDTO.getLocation();
-        if (local != null) {
-            String[] adressSegments = local.split(",");
-            addressBook.setLon(Double.valueOf(adressSegments[0]));
-            addressBook.setLat(Double.valueOf(adressSegments[1]));
-        }
-        addressBook.setId(id);
-        super.updateById(addressBook);
-    }
-
-    @Override
-    public void removeAddressBookByIds(String[] ids) {
-        if (ids.length <= 0) {
-            throw new ForbiddenOperationException("id不能为空");
-        }
-        List<Long> longIds = new ArrayList<>();
-        for (String id : ids) {
-            try {
-                long longId = Long.parseLong(id);
-                longIds.add(longId);
-            } catch (NumberFormatException e) {
-                throw new ForbiddenOperationException("Invalid ID format:" + id);
-            }
-        }
-
-        super.removeByIds(longIds);
-    }
-
-    @Override
-    public void setDefault(Integer flag, Long id) {
-        if (id == null) {
-            throw new ForbiddenOperationException("id不能为空");
-        }
-        if (flag == null) {
-            throw new ForbiddenOperationException("flag不能为空");
-        }
-        AddressBook addressBook = Optional.ofNullable(super.getById(id))
-                .orElseThrow(() -> new ForbiddenOperationException("Address book not found for ID: " + id));
-        if (flag == 1) {
-            lambdaUpdate()
-                    .eq(AddressBook::getUserId, UserContext.currentUserId())
-                    .eq(AddressBook::getIsDefault, 1)
-                    .set(AddressBook::getIsDefault, 0)
-                    .update();
-        }
-        addressBook.setIsDefault(flag);
-        super.updateById(addressBook);
-    }
-
-    @Override
-    public AddressBookResDTO getDefaultAddress() {
-        // // 创建QueryWrapper并添加用户ID匹配条件
-        // QueryWrapper<AddressBook> queryWrapper = new QueryWrapper<>();
-        // queryWrapper.eq("user_id", currentUserInfo.getId());
-        AddressBook defaultAddress = lambdaQuery()
-                .eq(AddressBook::getUserId, UserContext.currentUserId())
-                .eq(AddressBook::getIsDefault, 1)
-                .one();
-        return BeanUtils.copyProperties(defaultAddress, AddressBookResDTO.class);
     }
 }
